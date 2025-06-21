@@ -277,15 +277,11 @@ func (s *t_app_state) initialize_client(caddr string) error {
 			}
 
 			packet := p2p.NewPacket()
-			s.broadcast("newchunk", packet) 
+			packet.WriteUint32(uint32(len(s.chunks)))
+			s.broadcast("lookatme", packet) 
 
 			s.request_next_chunk_segs()
 		}
-	})
-
-	c.peer.On("newchunk", func (p *p2p.Packet) {
-		s.clients[c.peer.Addr].obtained_chunks++
-		log.Printf("peer %s now has %d chunks!\n", c.peer.Addr, s.clients[c.peer.Addr].obtained_chunks)
 	})
 
 	s.handle.HandlePeerIO(c.peer)
@@ -327,10 +323,6 @@ func (s *t_app_state) request_next_chunk_segs() error {
 		return fmt.Errorf("recieved all chunks")
 	}
 
-	if len(s.chunk_segs_to_recieve) > 0 {
-		return fmt.Errorf("must recieve every expected chunk segment from actively connected peers to advance") // TODO: disconnected peers and not active peers must be ignored
-	}
-
 	// growing chunks
 	s.chunks = append(s.chunks, make(Chunk, DataChunkSize))
 
@@ -340,26 +332,18 @@ func (s *t_app_state) request_next_chunk_segs() error {
 		targets = append(targets, k)
 	}
 
-	seg_size := DataChunkSize / len(targets) // if gcd(DataChunkSize, targets) = 1 we have a problem...(1)
-	for i, taddr := range targets {
-		csb := &t_chunk_bounds{
-			paddr: taddr,
-			chunk_index: curr_chunk_index,
-			start: uint32(seg_size * i),
-			size: uint32(seg_size * (i + 1)),
-		}
-
-		// this is used to compensate for the error introduced by the integer division
-		if i == len(targets) - 1 { csb.size += uint32(DataChunkSize - seg_size * len(targets)) }
-
-		s.chunk_segs_to_recieve[csb.paddr] = csb
-
+	i := 0
+	size := getDistributedSize() // if gcd(DataChunkSize, targets) = 1 we have a problem
+	for _, t := range targets {
 		packet := p2p.NewPacket()
-		packet.WriteUint32(csb.chunk_index)
-		packet.WriteUint32(csb.start) // it's 1 based
-		packet.WriteUint32(csb.size)
 
-		s.clients[csb.paddr].peer.Send("gimme", packet)
+		packet.WriteUint32(curr_chunk_index)
+		packet.WriteUint32(uint32(size * i)) // it's 1 based
+		packet.WriteUint32(uint32(size * (i + 1)))
+
+		t.peer.Send("gimme", packet)
+
+		i++
 	}
 	
 	return nil
