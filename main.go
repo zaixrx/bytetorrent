@@ -139,8 +139,8 @@ func new_app_state(handle *p2p.Handle, peers map[string]*p2p.Peer, pool *p2p.Pub
 		pool: pool,
 		handle: handle,
 
-		clients: new_clients(peers),
 		chunks: chunks,
+		clients: new_clients(peers),
 
 		chunk_segs_to_recieve: make(map[string]*t_chunk_bounds),
 	}
@@ -156,9 +156,6 @@ func (s *t_app_state) handle_pool_p2p() error {
 	for k := range s.clients {
 		s.initialize_client(k)
 	}
-
-	// send gimme message to every donor peer(peer who has the chunk we are intrested in)
-	s.request_next_chunk_segs()
 
 	// peers that are new to the network 
 	port, err := extract_port(s.pool.YourIP)
@@ -211,12 +208,17 @@ func (s *t_app_state) initialize_client(caddr string) error {
 		if err != nil {
 			return
 		}
-		if is_host == 1 {
-			s.max_chunks_count = obtained_chunks 
-			s.chunks = make([]Chunk, 0)
-		}
 		c.obtained_chunks = obtained_chunks 
-		log.Printf("peer %s has %d chunks! host? %d\n", caddr, obtained_chunks, is_host)
+		if is_host == 1 {
+			s.chunks = make([]Chunk, 0)
+			s.max_chunks_count = obtained_chunks 
+
+			err := s.request_next_chunk_segs()
+			if err != nil {
+				log.Println("ERROR_OUGA_BOUGA:", err)
+			}
+		}
+		log.Printf("peer %s has %d chunks! host? %d\n", caddr, c.obtained_chunks, is_host)
 	})
 
 	c.peer.On("gimme", func(packet *p2p.Packet) {
@@ -260,7 +262,7 @@ func (s *t_app_state) initialize_client(caddr string) error {
 		if err != nil {
 			return
 		}
-		if is_valid := s.expecting_chunk_seg(caddr, chunk_index, start, size); !is_valid {
+		if err := s.expecting_chunk_seg(caddr, chunk_index, start, size); err != nil {
 			log.Printf("UNVALID_HEREYAGO_RESPONSE: %s\n", err)
 			return
 		}
@@ -285,6 +287,7 @@ func (s *t_app_state) initialize_client(caddr string) error {
 
 	c.peer.On("newchunk", func (p *p2p.Packet) {
 		s.clients[c.peer.Addr].obtained_chunks++
+		// if you want to hack this here is a vulnerability
 		log.Printf("peer %s now has %d chunks!\n", c.peer.Addr, s.clients[c.peer.Addr].obtained_chunks)
 	})
 
@@ -300,16 +303,18 @@ func (s *t_app_state) has_chunk_segment(chunk_index, start, size uint32) []byte 
 	return ([]byte)(s.chunks[chunk_index][start:start+size])
 }
 // notice: this method removes the chunk segments bounds(csb) after operating on it regardless of it's validity
-func (s *t_app_state) expecting_chunk_seg(caddr string, chunk_index, start, size uint32) bool {
+func (s *t_app_state) expecting_chunk_seg(caddr string, chunk_index, start, size uint32) error {
 	csb, exists := s.chunk_segs_to_recieve[caddr]
 	// exists is false only if a dumb peer randomly decided to send data
 	// that it wasn't asked to send, or I fucked up(it is likely to be second case)
 	if !exists {
-		return false
+		return fmt.Errorf("didn't expect %s to send chunk seg", caddr)
 	}
-	res := csb.start == start && csb.size == size && csb.chunk_index == chunk_index  
 	delete(s.chunk_segs_to_recieve, caddr)
-	return res
+	if csb.start != start || csb.size != size || csb.chunk_index != chunk_index {
+		return fmt.Errorf("first: %v, second %v || same start: %v, same bounds: %v, same chunk: %v", csb.start == start, csb.size == size, csb.chunk_index == chunk_index)
+	}
+	return nil 
 }
 func (s *t_app_state) add_chunk_segment(chunk_index, start uint32, dat []byte) {
 	copy(s.chunks[chunk_index][start:], dat)
@@ -324,14 +329,14 @@ func (s *t_app_state) broadcast(msg string, packet *p2p.Packet) {
 func (s *t_app_state) request_next_chunk_segs() error {
 	curr_chunk_index := uint32(len(s.chunks))
 	if curr_chunk_index >= s.max_chunks_count {
-		return fmt.Errorf("recieved all chunks")
+		return fmt.Errorf("recieved all chunks, (current_size:%d, max_size:%d)", curr_chunk_index, s.max_chunks_count)
 	}
 
 	if len(s.chunk_segs_to_recieve) > 0 {
 		return fmt.Errorf("must recieve every expected chunk segment from actively connected peers to advance") // TODO: disconnected peers and not active peers must be ignored
+		// here is another vulnerability (;
 	}
 
-	// growing chunks
 	s.chunks = append(s.chunks, make(Chunk, DataChunkSize))
 
 	targets := make([]string, 0) // TODO: targets need to be pre-computed
@@ -340,7 +345,9 @@ func (s *t_app_state) request_next_chunk_segs() error {
 		targets = append(targets, k)
 	}
 
-	seg_size := DataChunkSize / len(targets) // if gcd(DataChunkSize, targets) = 1 we have a problem...(1)
+	log.Println(targets, s.clients)
+
+	seg_size := DataChunkSize / len(targets) // if gcd(DataChunkSize, targets) = 1 we have a problem
 	for i, taddr := range targets {
 		csb := &t_chunk_bounds{
 			paddr: taddr,
@@ -356,11 +363,13 @@ func (s *t_app_state) request_next_chunk_segs() error {
 
 		packet := p2p.NewPacket()
 		packet.WriteUint32(csb.chunk_index)
-		packet.WriteUint32(csb.start) // it's 1 based
+		packet.WriteUint32(csb.start)
 		packet.WriteUint32(csb.size)
 
 		s.clients[csb.paddr].peer.Send("gimme", packet)
 	}
+
+	log.Println(s.chunk_segs_to_recieve)
 	
 	return nil
 }
