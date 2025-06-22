@@ -1,5 +1,9 @@
 # ByteTorrent
 
+> ⚠️ **Not production-ready.** This is a showcase with educational value, not a secure, fully-featured file sharing client.
+
+![Preview](showcase.gif)
+
 **ByteTorrent** is a minimal BitTorrent-style peer-to-peer file transfer prototype built in Go using the [`gop2p`](https://github.com/zaixrx/gop2p) library. It was implemented in a really short period (~1 day so do expect a lot of bugs!) as a demonstration of how `gop2p` can be used to coordinate communication between peers in a decentralized manner.
 
 This project showcases:
@@ -8,10 +12,6 @@ This project showcases:
 - Event-driven peer communication using `gop2p`'s messaging system
 - Peer discovery and broadcast via a central broadcaster
 
-> ⚠️ **Not production-ready.** This is a showcase with educational value, not a secure, fully-featured file sharing client.
-
----
-
 ## Features
 
 - File splitting into fixed-size chunks (1024 bytes)
@@ -19,7 +19,6 @@ This project showcases:
 - Peer coordination using a simple handshake protocol
 - Hosting and joining of P2P pools
 
----
 
 ## Getting Started
 
