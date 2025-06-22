@@ -297,8 +297,8 @@ func (s *t_app_state) initialize_client(caddr string) error {
 
 			packet := p2p.NewPacket()
 			packet.WriteUint32(s.read_bytes)
-			s.broadcast("newchunk", packet) 
 
+			s.broadcast("newchunk", packet) 
 			s.request_next_chunk_segs()
 		}
 	})
@@ -381,7 +381,9 @@ func (s *t_app_state) request_next_chunk_segs() error {
 		targets = append(targets, k)
 	}
 
-	seg_size := min(DataChunkSize, s.max_bytes - s.read_bytes) / uint32(len(targets))
+	ulen := uint32(len(targets))
+	chunk_size := min(DataChunkSize, s.max_bytes - s.read_bytes) 
+	seg_size := chunk_size / ulen
 
 	log.Printf("targets to read %d bytes from: %v", seg_size, targets)
 
@@ -393,6 +395,10 @@ func (s *t_app_state) request_next_chunk_segs() error {
 			chunk_index: s.read_bytes / DataChunkSize,
 			start: seg_size * i,
 			size: seg_size,
+		}
+
+		if ulen == i + 1 && chunk_size % ulen != 0 {
+			csb.size += chunk_size - seg_size * ulen
 		}
 
 		s.chunk_segs_to_recieve[csb.paddr] = csb
