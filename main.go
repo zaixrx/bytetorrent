@@ -18,7 +18,7 @@ const (
 	BRPort = 6969
 	BRPingTicks = 20
 	BRHostname = "127.0.0.1"
-	DataChunkSize = 1024
+	DataChunkSize uint32 = 1024
 )
 
 func main() {
@@ -103,14 +103,14 @@ type t_chunk_bounds struct {
 }
 
 type t_client struct {
-	obtained_chunks uint32
 	peer *p2p.Peer
+	read_bytes uint32
 }
 
 func new_client(peer *p2p.Peer) *t_client {
 	return &t_client{
-		obtained_chunks: 0,
 		peer: peer,
+		read_bytes: 0,
 	}
 }
 
@@ -129,7 +129,7 @@ type t_app_state struct {
 	clients map[string]*t_client
 
 	chunks []Chunk
-	max_chunks_count uint32
+	max_bytes, read_bytes uint32
 
 	chunk_segs_to_recieve map[string]*t_chunk_bounds
 }
@@ -139,8 +139,11 @@ func new_app_state(handle *p2p.Handle, peers map[string]*p2p.Peer, pool *p2p.Pub
 		pool: pool,
 		handle: handle,
 
-		chunks: chunks,
 		clients: new_clients(peers),
+
+		chunks: chunks,
+		read_bytes: 0,
+		max_bytes: 0,
 
 		chunk_segs_to_recieve: make(map[string]*t_chunk_bounds),
 	}
@@ -176,7 +179,16 @@ func (s *t_app_state) handle_pool_p2p() error {
 		
 		greeting_packet := p2p.NewPacket()
 		greeting_packet.WriteByte(bool_to_cbyte(s.pool.YourIP == s.pool.HostIP))
-		greeting_packet.WriteUint32(uint32(len(s.chunks)))
+		
+		var (
+			ln uint32 = uint32(len(s.chunks))
+			nbytes uint32 = uint32(len(s.chunks[ln - 1]))
+		)
+		if ln > 1 {
+			nbytes += (ln - 1) * DataChunkSize
+		}
+
+		greeting_packet.WriteUint32(nbytes)
 
 		p.Send("greeting", greeting_packet)
 	}
@@ -194,7 +206,7 @@ func (s *t_app_state) initialize_client(caddr string) error {
 		log.Printf("peer %s disconnected", caddr)
 		if caddr == s.pool.HostIP {
 			log.Printf("Ajri ajri l host rah 5rj!")
-			// terminate p2p handle
+			// TODO: terminate p2p handle
 		}
 		delete(s.clients, caddr)
 	})
@@ -204,21 +216,21 @@ func (s *t_app_state) initialize_client(caddr string) error {
 		if err != nil {
 			return
 		}
-		obtained_chunks, err := p.ReadUInt32()
+		read_bytes, err := p.ReadUInt32()
 		if err != nil {
 			return
 		}
-		c.obtained_chunks = obtained_chunks 
+		c.read_bytes = read_bytes 
 		if is_host == 1 {
 			s.chunks = make([]Chunk, 0)
-			s.max_chunks_count = obtained_chunks 
+			s.max_bytes = read_bytes
 
 			err := s.request_next_chunk_segs()
 			if err != nil {
 				log.Println("ERROR_OUGA_BOUGA:", err)
 			}
 		}
-		log.Printf("peer %s has %d chunks! host? %d\n", caddr, c.obtained_chunks, is_host)
+		log.Printf("peer %s has %d chunks! host? %d\n", caddr, c.read_bytes / DataChunkSize, is_host)
 	})
 
 	c.peer.On("gimme", func(packet *p2p.Packet) {
@@ -233,20 +245,20 @@ func (s *t_app_state) initialize_client(caddr string) error {
 		size, err := packet.ReadUInt32()
 		if err != nil {
 			return
-		}	
-
-		chunk_seg := s.has_chunk_segment(chunk_index, start, size);
-		if chunk_seg == nil {
+		}
+		chunk_seg, err := s.has_chunk_segment(chunk_index, start, size);
+		if err != nil {
+			log.Printf("DONT_HAVE_SEG %v\n", err)
 			return // maybe even send back an error to the peer that demanded the segment 
 		}
 
-		send_packet := p2p.NewPacket()
-		send_packet.WriteUint32(chunk_index)
-		send_packet.WriteUint32(start)
-		send_packet.WriteUint32(size)
-		send_packet.WriteBytes(chunk_seg)
+		s_packet := p2p.NewPacket()
+		s_packet.WriteUint32(chunk_index)
+		s_packet.WriteUint32(start)
+		s_packet.WriteUint32(size)
+		s_packet.WriteBytes(chunk_seg)
 
-		c.peer.Send("hereyago", packet)
+		c.peer.Send("hereyago", s_packet)
 	})
 
 	c.peer.On("hereyago", func(packet *p2p.Packet) {
@@ -268,17 +280,23 @@ func (s *t_app_state) initialize_client(caddr string) error {
 		}
 		dat, err := packet.Get(size)
 		if err != nil {
+			log.Println(err)
 			return
 		}
-		s.add_chunk_segment(chunk_index, start, dat)
 
-		if len(s.chunk_segs_to_recieve) == 0 { // recieved all segments for the current chunk
-			if uint32(len(s.chunks)) == s.max_chunks_count {
+		s.add_chunk_segment(chunk_index, start, dat)
+		s.read_bytes += uint32(len(dat))
+
+		// recieved all segments for the current chunk
+		if len(s.chunk_segs_to_recieve) == 0 {
+			if s.read_bytes >= s.max_bytes {
+				s.read_bytes = s.max_bytes
 				log.Println("recieved all chunks!")
 				return
 			}
 
 			packet := p2p.NewPacket()
+			packet.WriteUint32(s.read_bytes)
 			s.broadcast("newchunk", packet) 
 
 			s.request_next_chunk_segs()
@@ -286,9 +304,14 @@ func (s *t_app_state) initialize_client(caddr string) error {
 	})
 
 	c.peer.On("newchunk", func (p *p2p.Packet) {
-		s.clients[c.peer.Addr].obtained_chunks++
-		// if you want to hack this here is a vulnerability
-		log.Printf("peer %s now has %d chunks!\n", c.peer.Addr, s.clients[c.peer.Addr].obtained_chunks)
+		// if you want to hack this, you could start here ;)
+		// unless I implement e2e encryption(which won't happen)
+		nbr, err := p.ReadUInt32()
+		if err != nil {
+			return
+		}
+		s.clients[c.peer.Addr].read_bytes = nbr
+		log.Printf("peer %s now has %d read_bytes!\n", c.peer.Addr, s.clients[c.peer.Addr].read_bytes)
 	})
 
 	s.handle.HandlePeerIO(c.peer)
@@ -296,12 +319,16 @@ func (s *t_app_state) initialize_client(caddr string) error {
 	return nil
 }
 
-func (s *t_app_state) has_chunk_segment(chunk_index, start, size uint32) []byte {
-	if chunk_index >= uint32(len(s.chunks)) || start + size > uint32(len(s.chunks[chunk_index])) {
-		return nil
+func (s *t_app_state) has_chunk_segment(chunk_index, start, size uint32) ([]byte, error) {
+	if chunk_index >= uint32(len(s.chunks))  {
+		return nil, fmt.Errorf("chunk_index(%d) went out of bound(%d)", chunk_index, len(s.chunks))
 	}
-	return ([]byte)(s.chunks[chunk_index][start:start+size])
+	if start + size > uint32(len(s.chunks[chunk_index])) {
+		return nil, fmt.Errorf("start(%d) + size(%d) went out of bound(%d)", start, size, len(s.chunks[chunk_index]))
+	}
+	return ([]byte)(s.chunks[chunk_index][start:start+size]), nil
 }
+
 // notice: this method removes the chunk segments bounds(csb) after operating on it regardless of it's validity
 func (s *t_app_state) expecting_chunk_seg(caddr string, chunk_index, start, size uint32) error {
 	csb, exists := s.chunk_segs_to_recieve[caddr]
@@ -312,13 +339,21 @@ func (s *t_app_state) expecting_chunk_seg(caddr string, chunk_index, start, size
 	}
 	delete(s.chunk_segs_to_recieve, caddr)
 	if csb.start != start || csb.size != size || csb.chunk_index != chunk_index {
-		return fmt.Errorf("first: %v, second %v || same start: %v, same bounds: %v, same chunk: %v", csb.start == start, csb.size == size, csb.chunk_index == chunk_index)
+		csbb := t_chunk_bounds{
+			paddr: caddr,
+			start: start,
+			size: size,
+			chunk_index: chunk_index,
+		}
+		return fmt.Errorf("first: %v, second %v", *csb, csbb)
 	}
 	return nil 
 }
+
 func (s *t_app_state) add_chunk_segment(chunk_index, start uint32, dat []byte) {
 	copy(s.chunks[chunk_index][start:], dat)
 }
+
 func (s *t_app_state) broadcast(msg string, packet *p2p.Packet) {
 	for _, c := range s.clients {
 		c.peer.Send(msg, packet)
@@ -327,39 +362,41 @@ func (s *t_app_state) broadcast(msg string, packet *p2p.Packet) {
 
 // the only constraint is that you must request one seg from one donar peer
 func (s *t_app_state) request_next_chunk_segs() error {
-	curr_chunk_index := uint32(len(s.chunks))
-	if curr_chunk_index >= s.max_chunks_count {
-		return fmt.Errorf("recieved all chunks, (current_size:%d, max_size:%d)", curr_chunk_index, s.max_chunks_count)
+	if s.read_bytes >= s.max_bytes {
+		return fmt.Errorf("recieved all %d chunks", s.max_bytes % DataChunkSize)
 	}
 
 	if len(s.chunk_segs_to_recieve) > 0 {
-		return fmt.Errorf("must recieve every expected chunk segment from actively connected peers to advance") // TODO: disconnected peers and not active peers must be ignored
-		// here is another vulnerability (;
+		return fmt.Errorf("must recieve every expected chunk segment from actively connected peers to advance")
+		// TODO: disconnected peers and not active peers must be ignored
+		// here is another vulnerability (; (unless I imeplement timeouts for enqueued requests)
 	}
 
 	s.chunks = append(s.chunks, make(Chunk, DataChunkSize))
 
-	targets := make([]string, 0) // TODO: targets need to be pre-computed
+	// TODO: targets need to be pre-computed
+	targets := make([]string, 0)
 	for k, c := range s.clients {
-		if curr_chunk_index >= c.obtained_chunks { continue }
+		if s.read_bytes >= c.read_bytes { continue }
 		targets = append(targets, k)
 	}
 
-	log.Println(targets, s.clients)
+	seg_size := min(DataChunkSize, s.max_bytes - s.read_bytes) / uint32(len(targets))
 
-	seg_size := DataChunkSize / len(targets) // if gcd(DataChunkSize, targets) = 1 we have a problem
-	for i, taddr := range targets {
+	log.Printf("targets to read %d bytes from: %v", seg_size, targets)
+
+	for _i, taddr := range targets {
+		i := uint32(_i)
+
 		csb := &t_chunk_bounds{
 			paddr: taddr,
-			chunk_index: curr_chunk_index,
-			start: uint32(seg_size * i),
-			size: uint32(seg_size * (i + 1)),
+			chunk_index: s.read_bytes / DataChunkSize,
+			start: seg_size * i,
+			size: seg_size,
 		}
 
-		// this is used to compensate for the error introduced by the integer division
-		if i == len(targets) - 1 { csb.size += uint32(DataChunkSize - seg_size * len(targets)) }
-
 		s.chunk_segs_to_recieve[csb.paddr] = csb
+		log.Printf("CSB: %v %d", csb, s.read_bytes)
 
 		packet := p2p.NewPacket()
 		packet.WriteUint32(csb.chunk_index)
@@ -369,7 +406,7 @@ func (s *t_app_state) request_next_chunk_segs() error {
 		s.clients[csb.paddr].peer.Send("gimme", packet)
 	}
 
-	log.Println(s.chunk_segs_to_recieve)
+	log.Printf("chunk segs to recieve %v\n", s.chunk_segs_to_recieve)
 	
 	return nil
 }
